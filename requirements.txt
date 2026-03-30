@@ -2,3 +2,4 @@ fastapi>=0.115
 uvicorn[standard]>=0.34
 sqlalchemy>=2.0
 pydantic>=2.11
+fastapi-cors>=0.2
