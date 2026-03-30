@@ -1,9 +1,20 @@
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
@@ -15,6 +26,13 @@ from schemas import ChatOut, MessageCreate, MessageOut
 TEOMAN = "Teoman"
 CLARA = "Clara"
 ALLOWED_SENDERS = {TEOMAN.lower(): TEOMAN, CLARA.lower(): CLARA}
+
+UPLOAD_DIR = Path.home() / "Projects" / "clara-dev" / "proje-x-files"
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+ALLOWED_FILE_EXTENSIONS = frozenset(
+    {".jpg", ".jpeg", ".png", ".gif", ".mp4", ".pdf", ".doc", ".docx", ".txt"}
+)
+CHUNK_SIZE = 1024 * 1024
 
 
 class ConnectionManager:
@@ -47,6 +65,32 @@ async def broadcast_message_out(msg: MessageOut) -> None:
     await manager.broadcast(json.dumps(msg.model_dump(mode="json")))
 
 
+def _safe_filename(name: str | None) -> str:
+    if not name:
+        raise HTTPException(status_code=400, detail="Dosya adı gerekli.")
+    base = Path(name).name
+    if not base or base in (".", ".."):
+        raise HTTPException(status_code=400, detail="Geçersiz dosya adı.")
+    return base
+
+
+def _extension_ok(filename: str) -> bool:
+    ext = Path(filename).suffix.lower()
+    return ext in ALLOWED_FILE_EXTENSIONS
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    try:
+        seed_if_empty(db)
+    finally:
+        db.close()
+    yield
+
+
 def seed_if_empty(db: Session) -> None:
     teoman = db.execute(select(User).where(User.name == TEOMAN)).scalar_one_or_none()
     clara = db.execute(select(User).where(User.name == CLARA)).scalar_one_or_none()
@@ -64,17 +108,6 @@ def seed_if_empty(db: Session) -> None:
     db.commit()
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    db = SessionLocal()
-    try:
-        seed_if_empty(db)
-    finally:
-        db.close()
-    yield
-
-
 app = FastAPI(title="Mesajlaşma API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
@@ -85,6 +118,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    name = _safe_filename(file.filename)
+    if not _extension_ok(name):
+        raise HTTPException(
+            status_code=400,
+            detail="İzin verilmeyen dosya türü. İzinli: jpg, png, gif, mp4, pdf, doc, docx, txt",
+        )
+    dest = UPLOAD_DIR / name
+    total = 0
+    try:
+        with open(dest, "wb") as out:
+            while True:
+                chunk = await file.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Dosya çok büyük (en fazla 50MB).",
+                    )
+                out.write(chunk)
+    except HTTPException:
+        if dest.exists():
+            dest.unlink()
+        raise
+    return {"filename": name, "url": f"/files/{name}"}
 
 
 @app.post("/message", response_model=MessageOut)
@@ -182,3 +245,10 @@ def list_chats(db: Session = Depends(get_db)):
         )
         for c in chats
     ]
+
+
+app.mount(
+    "/files",
+    StaticFiles(directory=str(UPLOAD_DIR)),
+    name="files",
+)
