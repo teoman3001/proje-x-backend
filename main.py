@@ -27,7 +27,7 @@ TEOMAN = "Teoman"
 CLARA = "Clara"
 ALLOWED_SENDERS = {TEOMAN.lower(): TEOMAN, CLARA.lower(): CLARA}
 
-UPLOAD_DIR = Path.home() / "Projects" / "clara-dev" / "proje-x-files"
+UPLOAD_DIR = Path("/tmp/proje-x-files")
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 ALLOWED_FILE_EXTENSIONS = frozenset(
     {".jpg", ".jpeg", ".png", ".gif", ".mp4", ".pdf", ".doc", ".docx", ".txt"}
