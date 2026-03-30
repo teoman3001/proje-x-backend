@@ -1,8 +1,11 @@
 import json
+import os
+import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
+from botocore.exceptions import ClientError
 from fastapi import (
     BackgroundTasks,
     Depends,
@@ -14,6 +17,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from sqlalchemy import select
@@ -22,12 +26,25 @@ from sqlalchemy.orm import Session, joinedload
 from database import Base, SessionLocal, engine, get_db
 from models import Chat, Message, User
 from schemas import ChatOut, MessageCreate, MessageOut
+from storage import (
+    ensure_local_upload_dir,
+    guess_content_type,
+    resolve_upload_dir,
+    r2_get_object_stream,
+    r2_settings,
+    r2_upload_file_from_path,
+)
 
 TEOMAN = "Teoman"
 CLARA = "Clara"
 ALLOWED_SENDERS = {TEOMAN.lower(): TEOMAN, CLARA.lower(): CLARA}
 
-UPLOAD_DIR = Path("./proje-x-files").resolve()
+UPLOAD_DIR = resolve_upload_dir()
+R2_CFG = r2_settings()
+USE_R2 = R2_CFG is not None
+if not USE_R2:
+    ensure_local_upload_dir(UPLOAD_DIR)
+
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 ALLOWED_FILE_EXTENSIONS = frozenset(
     {".jpg", ".jpeg", ".png", ".gif", ".mp4", ".pdf", ".doc", ".docx", ".txt"}
@@ -81,7 +98,6 @@ def _extension_ok(filename: str) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
@@ -128,9 +144,43 @@ async def upload_file(file: UploadFile = File(...)):
             status_code=400,
             detail="İzin verilmeyen dosya türü. İzinli: jpg, png, gif, mp4, pdf, doc, docx, txt",
         )
+    content_type = guess_content_type(name)
+
+    if USE_R2 and R2_CFG is not None:
+        tmp_path: str | None = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(prefix="px_", suffix=Path(name).suffix)
+            total = 0
+            with os.fdopen(fd, "wb") as out:
+                while True:
+                    chunk = await file.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_UPLOAD_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail="Dosya çok büyük (en fazla 50MB).",
+                        )
+                    out.write(chunk)
+            r2_upload_file_from_path(
+                R2_CFG, tmp_path, name, content_type
+            )
+        except HTTPException:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        pub = R2_CFG.get("public_base", "")
+        url = f"{pub}/{name}" if pub else f"/files/{name}"
+        return {"filename": name, "url": url, "storage": "r2"}
+
     dest = UPLOAD_DIR / name
     total = 0
     try:
+        ensure_local_upload_dir(UPLOAD_DIR)
         with open(dest, "wb") as out:
             while True:
                 chunk = await file.read(CHUNK_SIZE)
@@ -147,7 +197,7 @@ async def upload_file(file: UploadFile = File(...)):
         if dest.exists():
             dest.unlink()
         raise
-    return {"filename": name, "url": f"/files/{name}"}
+    return {"filename": name, "url": f"/files/{name}", "storage": "local"}
 
 
 @app.post("/message", response_model=MessageOut)
@@ -247,8 +297,37 @@ def list_chats(db: Session = Depends(get_db)):
     ]
 
 
-app.mount(
-    "/files",
-    StaticFiles(directory=str(UPLOAD_DIR)),
-    name="files",
-)
+if USE_R2 and R2_CFG is not None:
+
+    @app.get("/files/{filename}")
+    def download_from_r2(filename: str):
+        safe = Path(filename).name
+        if not safe or not _extension_ok(safe):
+            raise HTTPException(status_code=404, detail="Dosya bulunamadı.")
+        try:
+            body, ct = r2_get_object_stream(R2_CFG, safe)
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code in ("NoSuchKey", "404", "NotFound"):
+                raise HTTPException(status_code=404, detail="Dosya bulunamadı.") from e
+            raise HTTPException(status_code=500, detail="Depolama hatası.") from e
+
+        def iter_body():
+            try:
+                while True:
+                    chunk = body.read(64 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                body.close()
+
+        media = ct or guess_content_type(safe) or "application/octet-stream"
+        return StreamingResponse(iter_body(), media_type=media)
+
+else:
+    app.mount(
+        "/files",
+        StaticFiles(directory=str(UPLOAD_DIR)),
+        name="files",
+    )
