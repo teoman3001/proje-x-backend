@@ -30,6 +30,7 @@ from storage import (
     ensure_local_upload_dir,
     guess_content_type,
     resolve_upload_dir,
+    sanitize_filename,
     r2_get_object_stream,
     r2_settings,
     r2_upload_file_from_path,
@@ -85,7 +86,7 @@ async def broadcast_message_out(msg: MessageOut) -> None:
 def _safe_filename(name: str | None) -> str:
     if not name:
         raise HTTPException(status_code=400, detail="Dosya adı gerekli.")
-    base = Path(name).name
+    base = sanitize_filename(name)
     if not base or base in (".", ".."):
         raise HTTPException(status_code=400, detail="Geçersiz dosya adı.")
     return base
@@ -98,6 +99,8 @@ def _extension_ok(filename: str) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not USE_R2:
+        ensure_local_upload_dir(UPLOAD_DIR)
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
@@ -145,6 +148,8 @@ async def upload_file(file: UploadFile = File(...)):
             detail="İzin verilmeyen dosya türü. İzinli: jpg, png, gif, mp4, pdf, doc, docx, txt",
         )
     content_type = guess_content_type(name)
+    prefix = datetime.utcnow().strftime("%Y/%m/%d")
+    key = f"{prefix}/{name}"
 
     if USE_R2 and R2_CFG is not None:
         tmp_path: str | None = None
@@ -163,9 +168,7 @@ async def upload_file(file: UploadFile = File(...)):
                             detail="Dosya çok büyük (en fazla 50MB).",
                         )
                     out.write(chunk)
-            r2_upload_file_from_path(
-                R2_CFG, tmp_path, name, content_type
-            )
+            r2_upload_file_from_path(R2_CFG, tmp_path, key, content_type)
         except HTTPException:
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
@@ -174,13 +177,13 @@ async def upload_file(file: UploadFile = File(...)):
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
         pub = R2_CFG.get("public_base", "")
-        url = f"{pub}/{name}" if pub else f"/files/{name}"
-        return {"filename": name, "url": url, "storage": "r2"}
+        url = f"{pub}/{key}" if pub else f"/files/{key}"
+        return {"filename": name, "path": key, "url": url, "storage": "r2"}
 
-    dest = UPLOAD_DIR / name
+    dest = UPLOAD_DIR / prefix / name
     total = 0
     try:
-        ensure_local_upload_dir(UPLOAD_DIR)
+        ensure_local_upload_dir(dest.parent)
         with open(dest, "wb") as out:
             while True:
                 chunk = await file.read(CHUNK_SIZE)
@@ -197,7 +200,7 @@ async def upload_file(file: UploadFile = File(...)):
         if dest.exists():
             dest.unlink()
         raise
-    return {"filename": name, "url": f"/files/{name}", "storage": "local"}
+    return {"filename": name, "path": key, "url": f"/files/{key}", "storage": "local"}
 
 
 @app.post("/message", response_model=MessageOut)
@@ -299,13 +302,17 @@ def list_chats(db: Session = Depends(get_db)):
 
 if USE_R2 and R2_CFG is not None:
 
-    @app.get("/files/{filename}")
-    def download_from_r2(filename: str):
-        safe = Path(filename).name
-        if not safe or not _extension_ok(safe):
+    @app.get("/files/{file_path:path}")
+    def download_from_r2(file_path: str):
+        rel = Path(file_path)
+        if rel.is_absolute() or ".." in rel.parts:
             raise HTTPException(status_code=404, detail="Dosya bulunamadı.")
+        safe_name = rel.name
+        if not safe_name or not _extension_ok(safe_name):
+            raise HTTPException(status_code=404, detail="Dosya bulunamadı.")
+        key = "/".join(rel.parts)
         try:
-            body, ct = r2_get_object_stream(R2_CFG, safe)
+            body, ct = r2_get_object_stream(R2_CFG, key)
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code", "")
             if code in ("NoSuchKey", "404", "NotFound"):
@@ -322,7 +329,7 @@ if USE_R2 and R2_CFG is not None:
             finally:
                 body.close()
 
-        media = ct or guess_content_type(safe) or "application/octet-stream"
+        media = ct or guess_content_type(safe_name) or "application/octet-stream"
         return StreamingResponse(iter_body(), media_type=media)
 
 else:

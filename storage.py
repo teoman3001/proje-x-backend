@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -14,17 +16,43 @@ def _is_render() -> bool:
 
 
 def resolve_upload_dir() -> Path:
-    """Yerel disk modu için dizin. Öncelik: UPLOAD_DIR env > Render /tmp > proje kökü/proje-x-files."""
+    """Yerel disk modu için dizin.
+
+    Öncelik:
+    - UPLOAD_DIR env
+    - Render: /tmp/proje-x-files
+    - Local: ~/Projects/clara-dev/proje-x-files
+    """
     override = os.environ.get("UPLOAD_DIR")
     if override:
         return Path(override).expanduser().resolve()
     if _is_render():
         return Path("/tmp/proje-x-files")
-    return (Path(__file__).resolve().parent / "proje-x-files").resolve()
+    return (Path.home() / "Projects" / "clara-dev" / "proje-x-files").resolve()
 
 
 def ensure_local_upload_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def sanitize_filename(original: str) -> str:
+    """Güvenli dosya adı üretir (özel karakterleri temizler)."""
+    base = Path(original).name.strip()
+    if not base or base in (".", ".."):
+        return "file"
+
+    # Unicode -> ASCII-ish (örn: ğ -> g)
+    norm = unicodedata.normalize("NFKD", base)
+    norm = norm.encode("ascii", "ignore").decode("ascii")
+
+    ext = Path(norm).suffix.lower()
+    stem = Path(norm).stem
+    # allow: a-zA-Z0-9, _, -, .
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem)
+    stem = re.sub(r"_+", "_", stem).strip("._-")
+    if not stem:
+        stem = "file"
+    return f"{stem}{ext}"
 
 
 def r2_settings() -> dict[str, str] | None:
