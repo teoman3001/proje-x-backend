@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
@@ -75,15 +75,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Mesajlaşma API", version="0.1.0", lifespan=lifespan)
-
-# CORS - tüm origin'lere izin ver
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 @app.post("/message", response_model=MessageOut)
