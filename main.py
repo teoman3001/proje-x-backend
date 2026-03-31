@@ -23,7 +23,9 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
+from clara.websocket import register_clara_websocket
 from database import Base, SessionLocal, engine, get_db
+from endpoints.clara import router as clara_router
 from models import Chat, Message, User
 from schemas import ChatOut, MessageCreate, MessageOut
 from storage import (
@@ -35,6 +37,9 @@ from storage import (
     r2_settings,
     r2_upload_file_from_path,
 )
+
+BASE_DIR = Path(__file__).resolve().parent
+PANEL_DIR = BASE_DIR / "static" / "panel"
 
 TEOMAN = "Teoman"
 CLARA = "Clara"
@@ -101,6 +106,8 @@ def _extension_ok(filename: str) -> bool:
 async def lifespan(app: FastAPI):
     if not USE_R2:
         ensure_local_upload_dir(UPLOAD_DIR)
+    PANEL_DIR.mkdir(parents=True, exist_ok=True)
+    (BASE_DIR / "logs").mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
@@ -137,6 +144,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(clara_router)
+register_clara_websocket(app)
 
 
 @app.post("/upload")
@@ -338,3 +348,9 @@ else:
         StaticFiles(directory=str(UPLOAD_DIR)),
         name="files",
     )
+
+app.mount(
+    "/panel",
+    StaticFiles(directory=str(PANEL_DIR), html=True),
+    name="panel",
+)

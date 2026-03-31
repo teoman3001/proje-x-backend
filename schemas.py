@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -25,3 +26,10 @@ class ChatOut(BaseModel):
     user2_id: int
     user1_name: str
     user2_name: str
+
+
+class ExecuteBody(BaseModel):
+    command: str = Field(..., description="Örn: terminal, file, peekaboo")
+    action: str = Field(..., description="Örn: exec, read, screenshot")
+    params: dict[str, Any] | None = None
+    task_id: str | None = Field(None, description="Opsiyonel görev kimliği (callback)")

@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Proje X — Clara Kontrol</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; background: #0f1419; color: #e6edf3; }
+    body { margin: 0; padding: 1rem; max-width: 960px; margin-inline: auto; }
+    h1 { font-size: 1.25rem; margin: 0 0 1rem; }
+    .tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
+    .tabs button {
+      background: #21262d; border: 1px solid #30363d; color: #e6edf3;
+      padding: 0.5rem 0.75rem; border-radius: 6px; cursor: pointer;
+    }
+    .tabs button.active { background: #238636; border-color: #238636; }
+    section { display: none; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; background: #161b22; }
+    section.visible { display: block; }
+    label { display: block; font-size: 0.85rem; margin-top: 0.75rem; color: #8b949e; }
+    input, textarea, select { width: 100%; box-sizing: border-box; margin-top: 0.25rem; padding: 0.5rem; border-radius: 6px; border: 1px solid #30363d; background: #0d1117; color: #e6edf3; }
+    textarea { min-height: 120px; font-family: ui-monospace, monospace; font-size: 0.85rem; }
+    button.run { background: #1f6feb; border: none; color: #fff; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; margin-top: 0.75rem; }
+    button.ws { background: #8957e5; }
+    pre.out { background: #0d1117; padding: 0.75rem; border-radius: 6px; overflow: auto; max-height: 320px; font-size: 0.8rem; border: 1px solid #30363d; }
+    .row { display: grid; gap: 0.75rem; grid-template-columns: 1fr 1fr; }
+    @media (max-width: 700px) { .row { grid-template-columns: 1fr; } }
+    .hint { font-size: 0.8rem; color: #8b949e; margin-top: 0.25rem; }
+    .status { font-size: 0.85rem; margin-top: 0.5rem; }
+    .ok { color: #3fb950; }
+    .err { color: #f85149; }
+  </style>
+</head>
+<body>
+  <h1>Proje X — Panel</h1>
+  <div class="tabs">
+    <button type="button" class="active" data-tab="clara">Clara Kontrol</button>
+    <button type="button" data-tab="messages">Mesajlar (özet)</button>
+  </div>
+
+  <section id="tab-clara" class="visible">
+    <p class="hint">API tabanı (boş bırakılırsa bu sayfanın host’u kullanılır). <code>X-API-Key</code> zorunlu.</p>
+    <div class="row">
+      <div>
+        <label for="apiBase">API Base URL</label>
+        <input id="apiBase" type="text" placeholder="https://proje-x-backend.onrender.com" />
+      </div>
+      <div>
+        <label for="apiKey">X-API-Key</label>
+        <input id="apiKey" type="password" autocomplete="off" placeholder="CLARA_API_KEY" />
+      </div>
+    </div>
+    <label for="payload">POST /execute gövdesi (JSON)</label>
+    <textarea id="payload" spellcheck="false">{
+  "command": "system",
+  "action": "info",
+  "params": {}
+}</textarea>
+    <button type="button" class="run" id="btnExec">Komutu çalıştır</button>
+    <p class="status" id="httpStatus"></p>
+    <pre class="out" id="httpOut"></pre>
+
+    <hr style="border: none; border-top: 1px solid #30363d; margin: 1.5rem 0;" />
+
+    <label for="wsUrl">WebSocket URL</label>
+    <input id="wsUrl" type="text" placeholder="wss://.../ws/clara?token=YOUR_KEY" />
+    <button type="button" class="run ws" id="btnWs">WebSocket bağlan</button>
+    <button type="button" class="run" id="btnWsPing" disabled>ping gönder</button>
+    <p class="status" id="wsStatus"></p>
+    <pre class="out" id="wsOut"></pre>
+  </section>
+
+  <section id="tab-messages">
+    <p>Basit özet: <code>GET /messages</code> ve <code>GET /chats</code></p>
+    <button type="button" class="run" id="btnLoadMsgs">Mesajları yükle</button>
+    <pre class="out" id="msgOut"></pre>
+  </section>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const apiBase = () => ($('apiBase').value || '').trim() || window.location.origin;
+    const headers = () => {
+      const k = $('apiKey').value.trim();
+      const h = { 'Content-Type': 'application/json' };
+      if (k) h['X-API-Key'] = k;
+      return h;
+    };
+
+    document.querySelectorAll('.tabs button').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tabs button').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        document.querySelectorAll('section').forEach((s) => s.classList.remove('visible'));
+        $('tab-' + btn.dataset.tab).classList.add('visible');
+      });
+    });
+
+    $('btnExec').addEventListener('click', async () => {
+      $('httpStatus').textContent = '';
+      $('httpOut').textContent = '';
+      let body;
+      try { body = JSON.parse($('payload').value); }
+      catch (e) { $('httpStatus').innerHTML = '<span class="err">JSON parse hatası</span>'; return; }
+      try {
+        const r = await fetch(apiBase().replace(/\/$/, '') + '/execute', {
+          method: 'POST',
+          headers: headers(),
+          body: JSON.stringify(body),
+        });
+        const t = await r.text();
+        $('httpStatus').innerHTML = r.ok
+          ? '<span class="ok">HTTP ' + r.status + '</span>'
+          : '<span class="err">HTTP ' + r.status + '</span>';
+        try { $('httpOut').textContent = JSON.stringify(JSON.parse(t), null, 2); }
+        catch { $('httpOut').textContent = t; }
+      } catch (e) {
+        $('httpStatus').innerHTML = '<span class="err">İstek başarısız</span>';
+        $('httpOut').textContent = String(e);
+      }
+    });
+
+    $('btnLoadMsgs').addEventListener('click', async () => {
+      $('msgOut').textContent = 'Yükleniyor...';
+      try {
+        const base = apiBase().replace(/\/$/, '');
+        const [m, c] = await Promise.all([
+          fetch(base + '/messages').then((r) => r.json()),
+          fetch(base + '/chats').then((r) => r.json()),
+        ]);
+        $('msgOut').textContent = JSON.stringify({ chats: c, messages: m }, null, 2);
+      } catch (e) {
+        $('msgOut').textContent = String(e);
+      }
+    });
+
+    let sock = null;
+    function logWs(line) {
+      const el = $('wsOut');
+      el.textContent += line + '\n';
+      el.scrollTop = el.scrollHeight;
+    }
+
+    $('btnWs').addEventListener('click', () => {
+      if (sock) { sock.close(); sock = null; }
+      const url = $('wsUrl').value.trim();
+      if (!url) {
+        const k = $('apiKey').value.trim();
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const u = new URL(location.origin);
+        $('wsUrl').value = proto + '//' + u.host + '/ws/clara' + (k ? ('?token=' + encodeURIComponent(k)) : '');
+      }
+      const finalUrl = $('wsUrl').value.trim();
+      $('wsStatus').textContent = 'Bağlanıyor...';
+      $('wsOut').textContent = '';
+      sock = new WebSocket(finalUrl);
+      sock.onopen = () => {
+        $('wsStatus').innerHTML = '<span class="ok">Bağlı</span>';
+        $('btnWsPing').disabled = false;
+      };
+      sock.onclose = () => {
+        $('wsStatus').innerHTML = '<span class="err">Kapandı</span>';
+        $('btnWsPing').disabled = true;
+      };
+      sock.onerror = () => logWs('[error]');
+      sock.onmessage = (ev) => logWs(ev.data);
+    });
+
+    $('btnWsPing').addEventListener('click', () => {
+      if (sock && sock.readyState === 1) sock.send(JSON.stringify({ type: 'ping' }));
+    });
+
+    try {
+      const saved = localStorage.getItem('clara_api_key');
+      if (saved) $('apiKey').value = saved;
+    } catch (_) {}
+    $('apiKey').addEventListener('change', () => {
+      try { localStorage.setItem('clara_api_key', $('apiKey').value.trim()); } catch (_) {}
+    });
+  </script>
+</body>
+</html>
